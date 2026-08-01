@@ -305,18 +305,19 @@ class BaseDownloader(ABC):
         video_path: Optional[Path] = None
 
         if media_type == "video":
-            video_info = self._build_no_watermark_url(aweme_data)
-            if not video_info:
-                logger.error("No playable video URL found for aweme %s", aweme_id)
-                return False
+            if self.config.get("video", True):
+                video_info = self._build_no_watermark_url(aweme_data)
+                if not video_info:
+                    logger.error("No playable video URL found for aweme %s", aweme_id)
+                    return False
 
-            video_url, video_headers = video_info
-            video_path = save_dir / f"{file_stem}.mp4"
-            if not await self._download_with_retry(
-                video_url, video_path, session, headers=video_headers
-            ):
-                return False
-            downloaded_files.append(video_path)
+                video_url, video_headers = video_info
+                video_path = save_dir / f"{file_stem}.mp4"
+                if not await self._download_with_retry(
+                    video_url, video_path, session, headers=video_headers
+                ):
+                    return False
+                downloaded_files.append(video_path)
 
             if self.config.get("cover"):
                 cover_url = self._extract_first_url(aweme_data.get("video", {}).get("cover"))
@@ -345,60 +346,61 @@ class BaseDownloader(ABC):
                         downloaded_files.append(music_path)
 
         elif media_type == "gallery":
-            image_url_candidates = self._collect_image_url_candidates(aweme_data)
-            image_live_urls = self._collect_image_live_urls(aweme_data)
-            logger.info(
-                "Gallery aweme %s: %d image(s), %d live photo(s)",
-                aweme_id,
-                len(image_url_candidates),
-                len(image_live_urls),
-            )
-            if not image_url_candidates and not image_live_urls:
-                logger.error(
-                    "No gallery assets found for aweme %s (aweme_type=%s, "
-                    "has image_post_info=%s, has images=%s)",
+            if self.config.get("video", True):
+                image_url_candidates = self._collect_image_url_candidates(aweme_data)
+                image_live_urls = self._collect_image_live_urls(aweme_data)
+                logger.info(
+                    "Gallery aweme %s: %d image(s), %d live photo(s)",
                     aweme_id,
-                    aweme_data.get("aweme_type"),
-                    "image_post_info" in aweme_data,
-                    "images" in aweme_data,
+                    len(image_url_candidates),
+                    len(image_live_urls),
                 )
-                return False
+                if not image_url_candidates and not image_live_urls:
+                    logger.error(
+                        "No gallery assets found for aweme %s (aweme_type=%s, "
+                        "has image_post_info=%s, has images=%s)",
+                        aweme_id,
+                        aweme_data.get("aweme_type"),
+                        "image_post_info" in aweme_data,
+                        "images" in aweme_data,
+                    )
+                    return False
 
-            for index, candidates in enumerate(image_url_candidates, start=1):
-                download_result: bool | Path = False
-                for image_url in candidates:
-                    suffix = self._infer_image_extension(image_url)
-                    image_path = save_dir / f"{file_stem}_{index}{suffix}"
-                    download_result = await self._download_with_retry(
-                        image_url,
-                        image_path,
+                for index, candidates in enumerate(image_url_candidates, start=1):
+                    download_result: bool | Path = False
+                    for image_url in candidates:
+                        suffix = self._infer_image_extension(image_url)
+                        image_path = save_dir / f"{file_stem}_{index}{suffix}"
+                        download_result = await self._download_with_retry(
+                            image_url,
+                            image_path,
+                            session,
+                            headers=self._download_headers(),
+                            prefer_response_content_type=True,
+                            return_saved_path=True,
+                        )
+                        if download_result:
+                            downloaded_files.append(
+                                download_result if isinstance(download_result, Path) else image_path
+                            )
+                            break
+                    if not download_result:
+                        logger.error(f"Failed downloading image {index} for aweme {aweme_id}")
+                        return False
+
+                for index, live_url in enumerate(image_live_urls, start=1):
+                    suffix = Path(urlparse(live_url).path).suffix or ".mp4"
+                    live_path = save_dir / f"{file_stem}_live_{index}{suffix}"
+                    success = await self._download_with_retry(
+                        live_url,
+                        live_path,
                         session,
                         headers=self._download_headers(),
-                        prefer_response_content_type=True,
-                        return_saved_path=True,
                     )
-                    if download_result:
-                        downloaded_files.append(
-                            download_result if isinstance(download_result, Path) else image_path
-                        )
-                        break
-                if not download_result:
-                    logger.error(f"Failed downloading image {index} for aweme {aweme_id}")
-                    return False
-
-            for index, live_url in enumerate(image_live_urls, start=1):
-                suffix = Path(urlparse(live_url).path).suffix or ".mp4"
-                live_path = save_dir / f"{file_stem}_live_{index}{suffix}"
-                success = await self._download_with_retry(
-                    live_url,
-                    live_path,
-                    session,
-                    headers=self._download_headers(),
-                )
-                if not success:
-                    logger.error(f"Failed downloading live image {index} for aweme {aweme_id}")
-                    return False
-                downloaded_files.append(live_path)
+                    if not success:
+                        logger.error(f"Failed downloading live image {index} for aweme {aweme_id}")
+                        return False
+                    downloaded_files.append(live_path)
         else:
             logger.error("Unsupported media type for aweme %s: %s", aweme_id, media_type)
             return False

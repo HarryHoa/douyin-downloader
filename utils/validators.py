@@ -75,7 +75,7 @@ def parse_url_type(url: str) -> Optional[str]:
     if host.startswith("live.douyin.com"):
         return "live"
 
-    if "/video/" in path:
+    if "/video/" in path or "modal_id=" in url:
         return "video"
     if "/user/" in path:
         return "user"

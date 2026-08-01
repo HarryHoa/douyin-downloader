@@ -9,16 +9,20 @@ fastapi/uvicorn 是**可选**依赖。若未安装，导入本模块会 ImportEr
 
 from __future__ import annotations
 
+import mimetypes
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from auth import CookieManager
 from config import ConfigLoader
 from control import QueueManager, RateLimiter, RetryHandler
 from core import DouyinAPIClient, DownloaderFactory, URLParser
+from core.downloader_base import BaseDownloader
 from server.jobs import JobManager
 from storage import FileManager
 from utils.logger import setup_logger
@@ -35,6 +39,18 @@ class JobResponse(BaseModel):
     job_id: str
     status: str
     url: str
+
+
+class ResolveRequest(BaseModel):
+    url: str
+
+
+class ResolveResponse(BaseModel):
+    # camelCase on the wire — the NestJS client parses these exact names.
+    awemeId: str
+    durationSeconds: float
+    coverUrl: Optional[str] = None
+    title: Optional[str] = None
 
 
 class _ServerDeps:
@@ -75,13 +91,58 @@ class _ServerDeps:
         self.queue_manager = QueueManager(max_workers=int(config.get("thread", 5) or 5))
 
 
-async def _execute_download(url: str, deps: "_ServerDeps") -> Dict[str, int]:
-    """简化版 download_url：只负责执行并返回成功/失败计数。
+# Internal manifest file written by MetadataHandler into the download root;
+# it is bookkeeping, not a downloaded asset, so it is excluded from job files.
+_INTERNAL_ARTIFACTS = {"download_manifest.jsonl"}
+
+
+def _collect_job_files(job_root: Path) -> List[Dict[str, Any]]:
+    """Enumerate the media/asset files a job wrote under its isolated dir.
+
+    Each job downloads into ``<download_root>/<job_id>/`` so its output can be
+    attributed unambiguously (jobs run concurrently). We walk that directory,
+    skip internal artifacts / partial ``.tmp`` files / empty files, and return
+    a deterministic, index-ordered list. Sorting by relative path naturally
+    puts ``<stem>.mp4`` ahead of ``<stem>_cover.jpg`` / ``_music.mp3`` etc.
+    """
+    if not job_root.exists():
+        return []
+    files: List[Dict[str, Any]] = []
+    for path in sorted(job_root.rglob("*"), key=lambda p: p.relative_to(job_root).as_posix()):
+        if not path.is_file():
+            continue
+        if path.name in _INTERNAL_ARTIFACTS or path.suffix == ".tmp":
+            continue
+        try:
+            size = path.stat().st_size
+        except OSError:
+            continue
+        if size <= 0:
+            continue
+        files.append(
+            {
+                "index": len(files),
+                "bytes": size,
+                "filename": path.name,
+                "path": str(path.resolve()),
+            }
+        )
+    return files
+
+
+async def _execute_download(url: str, deps: "_ServerDeps", job_id: str) -> Dict[str, Any]:
+    """简化版 download_url：执行下载并返回计数 + 产出文件清单。
 
     有意不复用 cli.main.download_url —— 后者绑定了 progress_display 的 rich 状态。
     API client 仍按请求创建（aiohttp session 不跨请求复用）；其余重量级依赖从
     _ServerDeps 共享。
+
+    每个 job 下载到独立子目录 ``<download_root>/<job_id>/``，以便下载完成后能准确
+    枚举该 job 产出的文件（供 GET /jobs/{id}/files/{index} 流式返回）。
     """
+    job_root = (deps.file_manager.base_path / job_id).resolve()
+    job_file_manager = FileManager(str(job_root))
+
     async with DouyinAPIClient(deps.cookie_manager.get_cookies()) as api_client:
         if is_short_url(url):
             resolved = await api_client.resolve_short_url(normalize_short_url(url))
@@ -97,7 +158,7 @@ async def _execute_download(url: str, deps: "_ServerDeps") -> Dict[str, int]:
             parsed["type"],
             deps.config,
             api_client,
-            deps.file_manager,
+            job_file_manager,
             deps.cookie_manager,
             None,  # database 不在 server 场景里启用，避免单例冲突
             deps.rate_limiter,
@@ -114,14 +175,82 @@ async def _execute_download(url: str, deps: "_ServerDeps") -> Dict[str, int]:
             "success": result.success,
             "failed": result.failed,
             "skipped": result.skipped,
+            "files": _collect_job_files(job_root),
         }
+
+
+async def _resolve_metadata(url: str, deps: "_ServerDeps") -> Dict[str, Any]:
+    """Info-only resolve: fetch a single aweme's metadata, no media download.
+
+    Reuses the same resolver path as downloads (short-link 302 follow →
+    ``URLParser`` → ``DouyinAPIClient.get_video_detail``) so no signing /
+    anti-bot logic is duplicated. Raises ``HTTPException`` with a 4xx status on
+    invalid / unresolvable URLs (the NestJS side maps any 4xx → invalid_url).
+    """
+    async with DouyinAPIClient(deps.cookie_manager.get_cookies()) as api_client:
+        if is_short_url(url):
+            resolved = await api_client.resolve_short_url(normalize_short_url(url))
+            if not resolved:
+                raise HTTPException(status_code=404, detail=f"could not resolve short URL: {url}")
+            url = resolved
+
+        parsed = URLParser.parse(url)
+        if not parsed:
+            raise HTTPException(status_code=422, detail=f"unsupported URL: {url}")
+
+        aweme_id = parsed.get("aweme_id")
+        if not aweme_id:
+            raise HTTPException(
+                status_code=422,
+                detail=f"URL is not a single video/note (type={parsed.get('type')})",
+            )
+
+        detail = await api_client.get_video_detail(str(aweme_id))
+        if not detail:
+            raise HTTPException(
+                status_code=404, detail=f"metadata not found for aweme {aweme_id}"
+            )
+
+        return _extract_resolve_fields(detail)
+
+
+def _extract_resolve_fields(detail: Dict[str, Any]) -> Dict[str, Any]:
+    """Pull the camelCase resolve payload out of a raw aweme_detail dict.
+
+    duration lives at ``video.duration`` (milliseconds) — divide by 1000 for
+    seconds. ``desc`` is the title/caption. Cover comes from ``video.cover``
+    with graceful fallback to ``origin_cover`` / ``dynamic_cover``.
+    """
+    video = detail.get("video") if isinstance(detail.get("video"), dict) else {}
+
+    duration_ms = video.get("duration")
+    if duration_ms is None:
+        duration_ms = detail.get("duration")
+    try:
+        duration_seconds = float(duration_ms) / 1000.0 if duration_ms is not None else 0.0
+    except (TypeError, ValueError):
+        duration_seconds = 0.0
+
+    title = (detail.get("desc") or "").strip() or None
+    cover_url = (
+        BaseDownloader._extract_first_url(video.get("cover"))
+        or BaseDownloader._extract_first_url(video.get("origin_cover"))
+        or BaseDownloader._extract_first_url(video.get("dynamic_cover"))
+    )
+
+    return {
+        "awemeId": str(detail.get("aweme_id") or ""),
+        "durationSeconds": duration_seconds,
+        "coverUrl": cover_url,
+        "title": title,
+    }
 
 
 def build_app(config: ConfigLoader) -> FastAPI:
     deps = _ServerDeps(config)
 
-    async def executor(url: str) -> Dict[str, int]:
-        return await _execute_download(url, deps)
+    async def executor(url: str, job_id: str) -> Dict[str, Any]:
+        return await _execute_download(url, deps, job_id)
 
     server_cfg = config.get("server") or {}
     if not isinstance(server_cfg, dict):
@@ -153,6 +282,21 @@ def build_app(config: ConfigLoader) -> FastAPI:
     async def health() -> Dict[str, str]:
         return {"status": "ok"}
 
+    @app.post("/api/v1/resolve", response_model=ResolveResponse)
+    async def resolve(req: ResolveRequest) -> ResolveResponse:
+        if not req.url or not req.url.strip():
+            raise HTTPException(status_code=400, detail="url is required")
+        try:
+            data = await _resolve_metadata(req.url.strip(), deps)
+        except HTTPException:
+            raise
+        except Exception as exc:  # network / upstream error → 502 (unreachable)
+            logger.warning("resolve failed for %s: %s", req.url, exc)
+            raise HTTPException(
+                status_code=502, detail=f"upstream error: {type(exc).__name__}: {exc}"
+            )
+        return ResolveResponse(**data)
+
     @app.post("/api/v1/download", response_model=JobResponse)
     async def create_job(req: DownloadRequest) -> JobResponse:
         if not req.url:
@@ -166,6 +310,21 @@ def build_app(config: ConfigLoader) -> FastAPI:
         if job is None:
             raise HTTPException(status_code=404, detail="job not found")
         return job.to_dict()
+
+    @app.get("/api/v1/jobs/{job_id}/files/{index}")
+    async def get_job_file(job_id: str, index: int) -> FileResponse:
+        job = await manager.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="job not found")
+        if index < 0 or index >= len(job.files):
+            raise HTTPException(status_code=404, detail="file index not found")
+        entry = job.files[index]
+        path = entry.get("path")
+        filename = entry.get("filename") or f"{job_id}_{index}"
+        if not path or not Path(path).is_file():
+            raise HTTPException(status_code=404, detail="file no longer available on disk")
+        media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        return FileResponse(path, media_type=media_type, filename=filename)
 
     @app.get("/api/v1/jobs")
     async def list_jobs() -> Dict[str, List[Dict[str, Any]]]:

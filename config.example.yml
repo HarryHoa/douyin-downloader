@@ -1,12 +1,13 @@
 link:
-  - https://www.douyin.com/user/MS4wLjABAAAA6O7EZyfDRYXxJrUTpf91K3tmB4rBROkAw-nYMfld8ss
+  - https://www.douyin.com/jingxuan/knowledge?modal_id=7627039635029413147
 
 path: ./Downloaded/
 
-music: true
+video: true # Set to false to skip downloading the main video (e.g. for audio-only)
+music: true # Set to true to download the audio track (.mp3)
 cover: true
 avatar: true
-json: true
+json: true # Set to true to download metadata (.json)
 
 start_time: ""
 end_time: ""
@@ -80,12 +81,12 @@ browser_fallback:
 comments:
   enabled: false
   include_replies: false
-  max_comments: 0   # 0 = 不限
+  max_comments: 0 # 0 = 不限
   page_size: 20
 
 # 直播录制（可选）：当 link 指向 live.douyin.com/{room_id} 或 /follow/live/{room_id} 时生效
 live:
-  max_duration_seconds: 0   # 0 = 录到主播下播
+  max_duration_seconds: 0 # 0 = 录到主播下播
   chunk_size: 65536
   idle_timeout_seconds: 30
 
@@ -111,7 +112,7 @@ notifications:
 # REST API 服务模式（可选，需额外安装 fastapi + uvicorn）
 server:
   max_jobs: 500
-  job_ttl_seconds: 86400   # 完成态 job 保留 24 小时
+  job_ttl_seconds: 86400 # 完成态 job 保留 24 小时
 
 cookies:
   msToken: YOUR_MS_TOKEN
