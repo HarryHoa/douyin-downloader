@@ -15,13 +15,13 @@ except ImportError:  # pragma: no cover
 
 
 from config import ConfigLoader
-from server.app import build_app
-from server.jobs import JobManager
+from server.app import _collect_job_files, _extract_resolve_fields, build_app
+from server.jobs import DownloadJob, JobManager
 
 
 @pytest.mark.asyncio
 async def test_job_manager_runs_executor(tmp_path):
-    async def fake_executor(url: str) -> Dict[str, int]:
+    async def fake_executor(url: str, job_id: str = "") -> Dict[str, int]:
         return {"total": 1, "success": 1, "failed": 0, "skipped": 0}
 
     manager = JobManager(executor=fake_executor, max_concurrency=2)
@@ -38,7 +38,7 @@ async def test_job_manager_runs_executor(tmp_path):
 
 @pytest.mark.asyncio
 async def test_job_manager_marks_failure_on_executor_error(tmp_path):
-    async def boom(url: str) -> Dict[str, int]:
+    async def boom(url: str, job_id: str = "") -> Dict[str, int]:
         raise RuntimeError("bad url")
 
     manager = JobManager(executor=boom)
@@ -68,7 +68,7 @@ def test_download_endpoint_creates_job(tmp_path, monkeypatch):
     app = build_app(config)
 
     # 替换 job executor 为 fake（不去触达 Douyin）
-    async def fake_executor(url: str) -> Dict[str, int]:
+    async def fake_executor(url: str, job_id: str = "") -> Dict[str, int]:
         return {"total": 0, "success": 0, "failed": 0, "skipped": 0}
 
     app.state.job_manager.executor = fake_executor
@@ -135,7 +135,7 @@ def test_build_app_shares_deps_across_requests(tmp_path):
 async def test_job_manager_prunes_by_max_jobs():
     """max_jobs 超限时应优先淘汰最老的终态 job，保留 in-flight。"""
 
-    async def fast_executor(url: str) -> Dict[str, int]:
+    async def fast_executor(url: str, job_id: str = "") -> Dict[str, int]:
         return {"total": 0, "success": 0, "failed": 0, "skipped": 0}
 
     manager = JobManager(executor=fast_executor, max_jobs=3, job_ttl_seconds=0.0)
@@ -157,7 +157,7 @@ async def test_job_manager_prunes_by_max_jobs():
 async def test_job_manager_prunes_by_ttl():
     """TTL 过期的终态 job 应在下次 submit 时被清理。"""
 
-    async def fast_executor(url: str) -> Dict[str, int]:
+    async def fast_executor(url: str, job_id: str = "") -> Dict[str, int]:
         return {"total": 0, "success": 0, "failed": 0, "skipped": 0}
 
     manager = JobManager(executor=fast_executor, max_jobs=100, job_ttl_seconds=0.01)
@@ -173,3 +173,183 @@ async def test_job_manager_prunes_by_ttl():
     remaining_ids = {j.job_id for j in await manager.list_jobs()}
     assert old_job.job_id not in remaining_ids
     assert new_job.job_id in remaining_ids
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/resolve  (info-only metadata resolve)
+# ---------------------------------------------------------------------------
+
+
+def test_extract_resolve_fields_converts_duration_ms_to_seconds():
+    """video.duration is milliseconds → durationSeconds must be float seconds."""
+    detail = {
+        "aweme_id": 7123,
+        "desc": "  hello world  ",
+        "duration": 246360,
+        "video": {
+            "duration": 246360,
+            "cover": {"url_list": ["https://cdn/cover.jpg"]},
+        },
+    }
+    out = _extract_resolve_fields(detail)
+    assert out == {
+        "awemeId": "7123",
+        "durationSeconds": 246.36,
+        "coverUrl": "https://cdn/cover.jpg",
+        "title": "hello world",
+    }
+    assert isinstance(out["durationSeconds"], float)
+
+
+def test_extract_resolve_fields_cover_fallback_and_nulls():
+    """Missing cover/desc/duration degrade to origin_cover / None / 0.0."""
+    detail = {
+        "aweme_id": 9,
+        "desc": "",
+        "video": {"origin_cover": {"url_list": ["https://cdn/origin.jpg"]}},
+    }
+    out = _extract_resolve_fields(detail)
+    assert out["awemeId"] == "9"
+    assert out["durationSeconds"] == 0.0
+    assert out["coverUrl"] == "https://cdn/origin.jpg"
+    assert out["title"] is None
+
+
+def test_resolve_endpoint_rejects_empty_url(tmp_path):
+    config = ConfigLoader(None)
+    config.update(path=str(tmp_path))
+    app = build_app(config)
+    with TestClient(app) as client:
+        resp = client.post("/api/v1/resolve", json={"url": "  "})
+        assert resp.status_code == 400
+
+
+def test_resolve_endpoint_returns_camelcase(tmp_path, monkeypatch):
+    """Route returns the exact camelCase contract keys the NestJS client parses."""
+    config = ConfigLoader(None)
+    config.update(path=str(tmp_path))
+    app = build_app(config)
+
+    async def fake_resolve(url, deps):
+        return {
+            "awemeId": "7123456789012345678",
+            "durationSeconds": 246.36,
+            "coverUrl": "https://cdn/cover.jpg",
+            "title": "demo",
+        }
+
+    monkeypatch.setattr("server.app._resolve_metadata", fake_resolve)
+
+    with TestClient(app) as client:
+        resp = client.post("/api/v1/resolve", json={"url": "https://v.douyin.com/abc/"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert set(body.keys()) == {"awemeId", "durationSeconds", "coverUrl", "title"}
+        assert body["awemeId"] == "7123456789012345678"
+        assert body["durationSeconds"] == 246.36
+
+
+def test_resolve_endpoint_maps_invalid_url_to_4xx(tmp_path, monkeypatch):
+    from fastapi import HTTPException
+
+    config = ConfigLoader(None)
+    config.update(path=str(tmp_path))
+    app = build_app(config)
+
+    async def fake_resolve(url, deps):
+        raise HTTPException(status_code=422, detail="unsupported URL")
+
+    monkeypatch.setattr("server.app._resolve_metadata", fake_resolve)
+
+    with TestClient(app) as client:
+        resp = client.post("/api/v1/resolve", json={"url": "https://example.com/x"})
+        assert resp.status_code == 422
+        assert resp.json()["detail"] == "unsupported URL"
+
+
+# ---------------------------------------------------------------------------
+# job.files[] + GET /api/v1/jobs/{id}/files/{index}  (streaming)
+# ---------------------------------------------------------------------------
+
+
+def test_collect_job_files_indexes_and_excludes_internal(tmp_path):
+    """Walk a job dir: order by rel-path, index 0..n, skip manifest/.tmp/empty."""
+    root = tmp_path / "job1"
+    (root / "author").mkdir(parents=True)
+    (root / "author" / "vid.mp4").write_bytes(b"x" * 100)
+    (root / "author" / "vid_cover.jpg").write_bytes(b"y" * 20)
+    (root / "download_manifest.jsonl").write_text("{}")  # internal → excluded
+    (root / "author" / "partial.mp4.tmp").write_bytes(b"z" * 10)  # partial → excluded
+    (root / "author" / "empty.mp4").write_bytes(b"")  # empty → excluded
+
+    files = _collect_job_files(root)
+    names = [f["filename"] for f in files]
+    assert names == ["vid.mp4", "vid_cover.jpg"]  # .mp4 sorts before _cover.jpg
+    assert [f["index"] for f in files] == [0, 1]
+    assert files[0]["bytes"] == 100 and files[1]["bytes"] == 20
+    assert all("path" in f for f in files)  # abs path retained internally
+
+
+def test_collect_job_files_missing_dir_returns_empty(tmp_path):
+    assert _collect_job_files(tmp_path / "does-not-exist") == []
+
+
+def test_job_dict_projects_files_without_path():
+    """to_dict() exposes index/bytes/filename but never the internal abs path."""
+    job = DownloadJob(job_id="j1", url="u")
+    job.files = [{"index": 0, "bytes": 100, "filename": "v.mp4", "path": "/abs/v.mp4"}]
+    d = job.to_dict()
+    assert d["files"] == [{"index": 0, "bytes": 100, "filename": "v.mp4"}]
+    assert "path" not in d["files"][0]
+
+
+def test_job_file_streaming_endpoint(tmp_path):
+    """GET /jobs/{id}/files/{index} streams exact bytes; 404 on unknown/oob."""
+    config = ConfigLoader(None)
+    config.update(path=str(tmp_path))
+    app = build_app(config)
+
+    media = tmp_path / "clip.mp4"
+    payload = b"\x00\x01\x02VIDEO" * 500
+    media.write_bytes(payload)
+
+    # Inject a finished job pointing at the real file on disk.
+    job = DownloadJob(job_id="abc123", url="https://x")
+    job.status = "success"
+    job.files = [
+        {"index": 0, "bytes": len(payload), "filename": "clip.mp4", "path": str(media)}
+    ]
+    manager = app.state.job_manager
+    manager._jobs[job.job_id] = job
+
+    with TestClient(app) as client:
+        # job body exposes files[] (no path)
+        detail = client.get("/api/v1/jobs/abc123").json()
+        assert detail["files"] == [{"index": 0, "bytes": len(payload), "filename": "clip.mp4"}]
+
+        # stream index 0 → exact bytes
+        resp = client.get("/api/v1/jobs/abc123/files/0")
+        assert resp.status_code == 200
+        assert resp.content == payload
+        assert resp.headers["content-type"].startswith("video/mp4")
+
+        # out-of-range index → 404
+        assert client.get("/api/v1/jobs/abc123/files/9").status_code == 404
+        # unknown job → 404
+        assert client.get("/api/v1/jobs/nope/files/0").status_code == 404
+
+
+def test_job_file_streaming_missing_file_on_disk_returns_404(tmp_path):
+    config = ConfigLoader(None)
+    config.update(path=str(tmp_path))
+    app = build_app(config)
+
+    job = DownloadJob(job_id="gone", url="https://x")
+    job.status = "success"
+    job.files = [
+        {"index": 0, "bytes": 5, "filename": "x.mp4", "path": str(tmp_path / "missing.mp4")}
+    ]
+    app.state.job_manager._jobs[job.job_id] = job
+
+    with TestClient(app) as client:
+        assert client.get("/api/v1/jobs/gone/files/0").status_code == 404

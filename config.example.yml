@@ -3,13 +3,11 @@ link:
 
 path: ./Downloaded/
 
-# 是否下载视频文件；关闭后仍可按下方开关保存原始封面、音乐、头像或 JSON。
-# 默认只保存视频本体，其余附带产物按需打开。
-video: true
-music: false
-cover: false
-avatar: false
-json: false
+video: true # Set to false to skip downloading the main video (e.g. for audio-only)
+music: true # Set to true to download the audio track (.mp3)
+cover: true
+avatar: true
+json: true # Set to true to download metadata (.json)
 
 start_time: ""
 end_time: ""

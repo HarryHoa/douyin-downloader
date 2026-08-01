@@ -41,6 +41,11 @@ class DownloadJob:
         self.failed = 0
         self.skipped = 0
         self.error: Optional[str] = None
+        # Files produced by a finished download. Each entry is a dict with
+        # keys: index, bytes, filename, path. ``path`` is the absolute on-disk
+        # location used by the file-streaming endpoint and is intentionally
+        # omitted from ``to_dict`` (internal detail, not part of the HTTP body).
+        self.files: List[Dict[str, Any]] = []
         self._task: Optional[asyncio.Task] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -56,6 +61,14 @@ class DownloadJob:
             "failed": self.failed,
             "skipped": self.skipped,
             "error": self.error,
+            "files": [
+                {
+                    "index": int(f.get("index", i)),
+                    "bytes": int(f.get("bytes", 0)),
+                    "filename": f.get("filename"),
+                }
+                for i, f in enumerate(self.files)
+            ],
         }
 
 
@@ -77,7 +90,7 @@ class JobManager:
 
     def __init__(
         self,
-        executor: Callable[[str], Awaitable[Dict[str, int]]],
+        executor: Callable[[str, str], Awaitable[Dict[str, Any]]],
         *,
         max_concurrency: int = 2,
         max_jobs: int = DEFAULT_MAX_JOBS,
@@ -134,11 +147,13 @@ class JobManager:
             job.status = JobStatus.RUNNING
             job.started_at = _now_iso()
             try:
-                counts = await self.executor(job.url)
+                counts = await self.executor(job.url, job.job_id)
                 job.total = int(counts.get("total", 0))
                 job.success = int(counts.get("success", 0))
                 job.failed = int(counts.get("failed", 0))
                 job.skipped = int(counts.get("skipped", 0))
+                files = counts.get("files")
+                job.files = list(files) if isinstance(files, list) else []
                 # 只要跑完就是 success；具体成功/失败个数通过字段区分
                 job.status = JobStatus.SUCCESS if job.failed == 0 else JobStatus.FAILED
             except Exception as exc:

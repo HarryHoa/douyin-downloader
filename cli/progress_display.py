@@ -42,12 +42,15 @@ class ProgressDisplay:
 
     def show_banner(self):
         banner = """
-╔══════════════════════════════════════════╗
-║     Douyin Downloader v2.0.0            ║
-║     抖音批量下载工具                     ║
-╚══════════════════════════════════════════╝
++==========================================+
+|     Douyin Downloader v2.0.0            |
+|     Douyin Batch Downloader             |
++==========================================+
         """
-        self._active_console().print(banner, style="bold cyan")
+        try:
+            self._active_console().print(banner, style="bold cyan")
+        except UnicodeEncodeError:
+            print(banner)
 
     def create_progress(self) -> Progress:
         return Progress(
@@ -70,10 +73,10 @@ class ProgressDisplay:
         self._progress = self._progress_ctx.__enter__()
         self._single_url_item_mode = False
         self._overall_task_id = self._progress.add_task(
-            "总体进度",
+            "Overall progress",
             total=max(total_urls, 1),
             completed=0,
-            detail=f"共 {total_urls} 个 URL",
+            detail=f"{total_urls} URL(s)",
         )
 
     def stop_download_session(self):
@@ -176,11 +179,11 @@ class ProgressDisplay:
                 self._overall_task_id,
                 total=self._item_total,
                 completed=self._item_completed,
-                detail=f"共 {total} 个作品",
+                detail=f"{total} item(s)",
             )
 
         description = self._format_item_description()
-        item_detail = detail or ("无待下载条目" if total == 0 else "")
+        item_detail = detail or ("No items to download" if total == 0 else "")
 
         if self._item_task_id is None:
             self._item_task_id = self._progress.add_task(
@@ -214,9 +217,9 @@ class ProgressDisplay:
         if self._item_completed < self._item_total:
             self._item_completed += 1
 
-        status_map = {"success": "成功", "failed": "失败", "skipped": "跳过"}
+        status_map = {"success": "OK", "failed": "FAIL", "skipped": "SKIP"}
         status_text = status_map.get(status, status)
-        item_detail = f"最近: {status_text} {self._shorten(detail, max_len=36)}"
+        item_detail = f"Last: {status_text} {self._shorten(detail, max_len=36)}"
         if reason:
             item_detail += f" · {self._shorten(reason, max_len=36)}"
 
@@ -230,7 +233,7 @@ class ProgressDisplay:
             self._progress.update(
                 self._overall_task_id,
                 completed=self._item_completed,
-                detail=f"共 {self._item_total} 个作品",
+                detail=f"{self._item_total} item(s)",
             )
 
     def show_result(self, result):
@@ -266,16 +269,16 @@ class ProgressDisplay:
         self._active_console().print(table)
 
     def print_info(self, message: str):
-        self._active_console().print(f"[blue]ℹ[/blue] {message}")
+        self._active_console().print(f"[blue][INFO][/blue] {message}")
 
     def print_success(self, message: str):
-        self._active_console().print(f"[green]✓[/green] {message}")
+        self._active_console().print(f"[green][OK][/green] {message}")
 
     def print_warning(self, message: str):
-        self._active_console().print(f"[yellow]⚠[/yellow] {message}")
+        self._active_console().print(f"[yellow][WARN][/yellow] {message}")
 
     def print_error(self, message: str):
-        self._active_console().print(f"[red]✗[/red] {message}")
+        self._active_console().print(f"[red][ERR][/red] {message}")
 
     def _cleanup_url_tasks(self):
         if not self._progress:
@@ -295,10 +298,10 @@ class ProgressDisplay:
 
     def _format_item_description(self) -> str:
         return (
-            "作品下载 "
-            f"S:{self._item_stats['success']} "
-            f"F:{self._item_stats['failed']} "
-            f"K:{self._item_stats['skipped']}"
+            "Items "
+            f"OK:{self._item_stats['success']} "
+            f"FAIL:{self._item_stats['failed']} "
+            f"SKIP:{self._item_stats['skipped']}"
         )
 
     def _active_console(self) -> Console:

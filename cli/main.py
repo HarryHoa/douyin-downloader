@@ -82,7 +82,7 @@ async def download_url(
     progress_reporter: ProgressDisplay = None,
 ):
     if progress_reporter:
-        progress_reporter.advance_step("初始化", "创建下载组件")
+        progress_reporter.advance_step("Init", "Creating download components")
     file_manager = FileManager(config.get("path"))
     rate_limiter = RateLimiter(max_per_second=float(config.get("rate_limit", 2) or 2))
     retry_handler = RetryHandler(max_retries=config.get("retry_times", 3))
@@ -95,7 +95,7 @@ async def download_url(
         proxy=config.get("proxy"),
     ) as api_client:
         if progress_reporter:
-            progress_reporter.advance_step("解析链接", "检查短链并解析 URL")
+            progress_reporter.advance_step("Parse URL", "Checking short URL and resolving")
         # 支持多种短链变体：v.douyin.com / v.iesdouyin.com / 无 scheme 的裸链接
         if is_short_url(url):
             resolved_url = await api_client.resolve_short_url(normalize_short_url(url))
@@ -103,14 +103,14 @@ async def download_url(
                 url = resolved_url
             else:
                 if progress_reporter:
-                    progress_reporter.update_step("解析链接", "短链解析失败")
+                    progress_reporter.update_step("Parse URL", "Short URL resolution failed")
                 display.print_error(f"Failed to resolve short URL: {url}")
                 return None
 
         parsed = URLParser.parse(url)
         if not parsed:
             if progress_reporter:
-                progress_reporter.update_step("解析链接", "URL 解析失败")
+                progress_reporter.update_step("Parse URL", "URL parsing failed")
             display.print_error(f"Failed to parse URL: {url}")
             return None
 
@@ -127,7 +127,7 @@ async def download_url(
         if not progress_reporter:
             display.print_info(f"URL type: {parsed['type']}")
         if progress_reporter:
-            progress_reporter.advance_step("创建下载器", f"URL 类型: {parsed['type']}")
+            progress_reporter.advance_step("Create downloader", f"URL type: {parsed['type']}")
 
         downloader = DownloaderFactory.create(
             parsed["type"],
@@ -144,12 +144,12 @@ async def download_url(
 
         if not downloader:
             if progress_reporter:
-                progress_reporter.update_step("创建下载器", "未找到匹配下载器")
+                progress_reporter.update_step("Create downloader", "No matching downloader found")
             display.print_error(f"No downloader found for type: {parsed['type']}")
             return None
 
         if progress_reporter:
-            progress_reporter.advance_step("执行下载", "开始拉取与下载资源")
+            progress_reporter.advance_step("Downloading", "Fetching and downloading content")
         try:
             result = await downloader.download(parsed)
         except Exception as exc:
@@ -158,14 +158,14 @@ async def download_url(
             # crashing the whole batch. Keeps multi-URL CLI runs robust while
             # still telling the user why the URL was skipped.
             if progress_reporter:
-                progress_reporter.update_step("执行下载", f"失败：{exc}")
+                progress_reporter.update_step("Downloading", f"Failed: {exc}")
             display.print_error(f"Download failed for {url}: {exc}")
             return None
 
         if progress_reporter:
             progress_reporter.advance_step(
-                "记录历史",
-                "写入数据库历史" if (result and database) else "数据库未启用，跳过",
+                "Save history",
+                "Writing to database" if (result and database) else "Database disabled, skipping",
             )
         if result and database:
             safe_config = {
@@ -186,11 +186,11 @@ async def download_url(
         if progress_reporter:
             if result:
                 progress_reporter.advance_step(
-                    "收尾",
-                    f"成功 {result.success} / 失败 {result.failed} / 跳过 {result.skipped}",
+                    "Done",
+                    f"Success {result.success} / Failed {result.failed} / Skipped {result.skipped}",
                 )
             else:
-                progress_reporter.advance_step("收尾", "无可统计结果")
+                progress_reporter.advance_step("Done", "No results to report")
 
         # 评论没取全不计入失败数，单独提示，免得「失败 0」掩盖了缺的评论。
         comments_note = getattr(downloader, "comments_incomplete_note", None)
@@ -305,7 +305,7 @@ async def main_async(args):
                 all_results.append(result)
                 display.complete_url(result)
             else:
-                display.fail_url("下载失败或链接无效")
+                display.fail_url("Download failed or invalid URL")
     finally:
         display.stop_download_session()
         if database is not None:
@@ -346,18 +346,18 @@ async def _run_discovery_subcommand(
         proxy=config.get("proxy"),
     ) as api_client:
         if args.hot_board is not None:
-            display.print_info("拉取抖音热搜榜...")
+            display.print_info("Fetching Douyin hot board...")
             result = await dump_hot_board(api_client, base_path, limit=int(args.hot_board or 0))
-            display.print_success(f"热榜已保存：{result['count']} 条 -> {result['path']}")
+            display.print_success(f"Hot board saved: {result['count']} items -> {result['path']}")
         if args.search:
-            display.print_info(f"搜索关键词：{args.search}")
+            display.print_info(f"Searching keyword: {args.search}")
             result = await search_and_dump(
                 api_client,
                 args.search,
                 base_path,
                 max_items=int(args.search_max or 50),
             )
-            display.print_success(f"搜索结果已保存：{result['count']} 条 -> {result['path']}")
+            display.print_success(f"Search results saved: {result['count']} items -> {result['path']}")
 
 
 async def _recover_live_recordings(database, config: ConfigLoader) -> None:
@@ -376,17 +376,17 @@ async def _recover_live_recordings(database, config: ConfigLoader) -> None:
 
 
 async def _run_serve_subcommand(args, config: ConfigLoader) -> None:
-    """启动 REST API 服务模式（fastapi + uvicorn 为可选依赖）。"""
+    """Start REST API server mode (fastapi + uvicorn are optional dependencies)."""
     try:
         from server.app import run_server
     except ImportError as exc:
         display.print_error(
-            f"REST 服务模式需要安装可选依赖 fastapi + uvicorn："
-            f"\n  pip install fastapi uvicorn\n原始错误：{exc}"
+            f"REST server mode requires optional dependencies fastapi + uvicorn:\n"
+            f"  pip install fastapi uvicorn\nOriginal error: {exc}"
         )
         return
 
-    display.print_info(f"启动 REST 服务：http://{args.serve_host}:{args.serve_port}")
+    display.print_info(f"Starting REST server: http://{args.serve_host}:{args.serve_port}")
     await run_server(config, host=args.serve_host, port=args.serve_port)
 
 
@@ -396,17 +396,17 @@ async def _dispatch_notifications(config: ConfigLoader, total_result: Any, url_c
         return
 
     if total_result is None:
-        title = "抖音下载器：全部失败"
-        body = f"共处理 {url_count} 个链接，无成功结果"
+        title = "Douyin Downloader: All failed"
+        body = f"Processed {url_count} URL(s), no successful results"
         level = "failure"
     else:
         fail_or_partial = total_result.failed > 0 or total_result.success == 0
         level = "failure" if fail_or_partial else "success"
-        title = "抖音下载完成" if level == "success" else "抖音下载部分失败"
+        title = "Douyin download complete" if level == "success" else "Douyin download partially failed"
         body = (
-            f"链接 {url_count} / 总作品 {total_result.total} / "
-            f"成功 {total_result.success} / 失败 {total_result.failed} / "
-            f"跳过 {total_result.skipped}"
+            f"URLs {url_count} / Total {total_result.total} / "
+            f"Success {total_result.success} / Failed {total_result.failed} / "
+            f"Skipped {total_result.skipped}"
         )
 
     try:
@@ -423,7 +423,7 @@ async def _dispatch_notifications(config: ConfigLoader, total_result: Any, url_c
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Douyin Downloader - 抖音批量下载工具")
+    parser = argparse.ArgumentParser(description="Douyin Downloader - Batch video downloader for Douyin")
     parser.add_argument("-u", "--url", action="append", help="Download URL(s)")
     parser.add_argument("-c", "--config", help="Config file path (default: config.yml)")
     parser.add_argument("-p", "--path", help="Save path")
@@ -437,28 +437,28 @@ def main():
         const=0,
         default=None,
         metavar="N",
-        help="拉取抖音热搜榜并导出 JSONL，可选上限 N（默认全部）",
+        help="Fetch Douyin hot board and export to JSONL, optional limit N (default: all)",
     )
     parser.add_argument(
         "--search",
         type=str,
         default=None,
         metavar="KEYWORD",
-        help="按关键词搜索作品并导出 JSONL",
+        help="Search videos by keyword and export to JSONL",
     )
     parser.add_argument(
         "--search-max",
         type=int,
         default=50,
-        help="--search 场景下最多拉取条数（默认 50）",
+        help="Maximum number of results for --search (default: 50)",
     )
     parser.add_argument(
         "--serve",
         action="store_true",
-        help="以 REST API 服务模式运行（需要安装 fastapi + uvicorn）",
+        help="Run in REST API server mode (requires fastapi + uvicorn)",
     )
-    parser.add_argument("--serve-host", type=str, default="127.0.0.1", help="REST 服务监听地址")
-    parser.add_argument("--serve-port", type=int, default=8000, help="REST 服务监听端口")
+    parser.add_argument("--serve-host", type=str, default="127.0.0.1", help="REST server listen address")
+    parser.add_argument("--serve-port", type=int, default=8000, help="REST server listen port")
     try:
         from __init__ import __version__
     except ImportError:
